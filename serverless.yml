@@ -1,0 +1,178 @@
+service: itsm-cambios
+frameworkVersion: "3"
+
+# Contrato de integración v1.1 (avance 30%):
+#  - us-east-1, stage dev, Python 3.12, LabRole.
+#  - Authorizer compartido de itsm-auth vía SSM /itsm/{stage}/authorizer-arn.
+#  - SIN SNS/SQS ni consumidores en esta fase (EVENTS_ENABLED=false, no se resuelve
+#    /itsm/{stage}/sns-eventos-arn ni /itsm/{stage}/q-cambios-arn).
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 15
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    CAMBIOS_TABLE: ${self:service}-${sls:stage}-cambios
+    EVENTS_ENABLED: "false"
+
+package:
+  patterns:
+    - "!seed/**"
+    - "!scripts/**"
+    - "!docs/**"
+    - "!tests/**"
+    - "!README.md"
+    - "!requirements-dev.txt"
+    - "!requirements-seed.txt"
+    - "!.venv/**"
+    - "!venv/**"
+    - "!node_modules/**"
+    - "!**/__pycache__/**"
+    - "!src/consumers/**"   # código futuro (fase EDA), fuera del despliegue
+
+custom:
+  authorizer:
+    arn: ${ssm:/itsm/${sls:stage}/authorizer-arn}
+    type: token
+    identitySource: method.request.header.Authorization
+    resultTtlInSeconds: 0
+
+functions:
+  api:
+    handler: src/handlers/cambios.handler
+    description: API REST de Cambios (RFC) - ITSM multi-tenant
+    events:
+      - http:
+          path: cambios
+          method: get
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/calendario
+          method: get
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/{id}
+          method: get
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/{id}
+          method: put
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/{id}/enviar
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/{id}/aprobar
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/{id}/rechazar
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/{id}/programar
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizer}
+      - http:
+          path: cambios/{id}/implementar
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizer}
+
+resources:
+  Resources:
+    CambiosTable:
+      Type: AWS::DynamoDB::Table
+      # Retain: un `serverless remove` accidental no borra los 30 000 registros.
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        TableName: ${self:provider.environment.CAMBIOS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: tenant_id
+            AttributeType: S
+          - AttributeName: cambio_id
+            AttributeType: S
+          - AttributeName: estado_creado
+            AttributeType: S
+          - AttributeName: ventana_inicio
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenant_id
+            KeyType: HASH
+          - AttributeName: cambio_id
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: GSI1
+            KeySchema:
+              - AttributeName: tenant_id
+                KeyType: HASH
+              - AttributeName: estado_creado
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: GSI2
+            KeySchema:
+              - AttributeName: tenant_id
+                KeyType: HASH
+              - AttributeName: ventana_inicio
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    # Errores del authorizer (401/403) también con CORS para que el navegador los lea.
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ResponseType: DEFAULT_4XX
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+    GatewayResponseDefault5XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ResponseType: DEFAULT_5XX
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+
+  Outputs:
+    CambiosApiUrl:
+      Description: URL base de la API de Cambios (usar como VITE_API_CAMBIOS)
+      Value:
+        Fn::Join:
+          - ""
+          - - https://
+            - Ref: ApiGatewayRestApi
+            - .execute-api.
+            - ${self:provider.region}
+            - .amazonaws.com/
+            - ${sls:stage}
+    CambiosTableName:
+      Value:
+        Ref: CambiosTable

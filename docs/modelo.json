@@ -1,0 +1,79 @@
+{
+  "servicio": "itsm-cambios",
+  "base_de_datos": "DynamoDB (NoSQL, PAY_PER_REQUEST, DeletionPolicy Retain)",
+  "tabla": "itsm-cambios-{stage}-cambios",
+  "claves": {
+    "partition": "tenant_id",
+    "sort": "cambio_id"
+  },
+  "indices": [
+    {
+      "nombre": "GSI1",
+      "partition": "tenant_id",
+      "sort": "estado_creado",
+      "formato_sort": "{estado}#{creado_en}",
+      "proposito": "Listar cambios por estado (filtro ?estado=) sin Scan, más recientes primero."
+    },
+    {
+      "nombre": "GSI2",
+      "partition": "tenant_id",
+      "sort": "ventana_inicio",
+      "proposito": "Calendario de cambios (GET /cambios/calendario?desde&hasta). Índice disperso: solo contiene cambios PROGRAMADO o IMPLEMENTADO, que son los que tienen ventana."
+    }
+  ],
+  "multi_tenancy": "tenant_id es la partition key y siempre se toma del contexto del Lambda Authorizer (JWT). Todas las consultas usan Query con tenant_id = tenant autenticado; un ID de otro tenant responde 404.",
+  "estados": ["BORRADOR", "PENDIENTE_APROBACION", "APROBADO", "RECHAZADO", "PROGRAMADO", "IMPLEMENTADO"],
+  "transiciones": {
+    "POST /cambios/{id}/enviar": "BORRADOR -> PENDIENTE_APROBACION (requiere plan_implementacion y plan_rollback)",
+    "POST /cambios/{id}/aprobar": "PENDIENTE_APROBACION -> APROBADO (solo ADMIN)",
+    "POST /cambios/{id}/rechazar": "PENDIENTE_APROBACION -> RECHAZADO (solo ADMIN, requiere motivo)",
+    "POST /cambios/{id}/programar": "APROBADO | PROGRAMADO -> PROGRAMADO (ventana_inicio < ventana_fin)",
+    "POST /cambios/{id}/implementar": "PROGRAMADO -> IMPLEMENTADO"
+  },
+  "tipos": ["ESTANDAR", "NORMAL", "EMERGENCIA"],
+  "riesgos": ["ALTO", "MEDIO", "BAJO"],
+  "referencias_a_otros_servicios": {
+    "solicitante_id": "usr-{tenant}-NNNNN (itsm-auth)",
+    "aprobador_id": "usr-{tenant}-NNNNN (itsm-auth)",
+    "problema_id": "prb-{tenant}-NNNNNN (itsm-problemas) o null",
+    "solicitud_id": "req-{tenant}-NNNNNN (itsm-solicitudes) o null"
+  },
+  "ejemplo": {
+    "tenant_id": "acme",
+    "cambio_id": "chg-acme-000001",
+    "titulo": "Actualizar firmware del firewall perimetral",
+    "descripcion": "Aplicar parche de seguridad del fabricante.",
+    "tipo": "NORMAL",
+    "riesgo": "ALTO",
+    "estado": "PROGRAMADO",
+    "estado_creado": "PROGRAMADO#2026-11-05T14:30:00Z",
+    "plan_implementacion": "Aplicar firmware 7.2 en el nodo pasivo y luego conmutar.",
+    "plan_rollback": "Restaurar firmware 7.0 desde backup del equipo.",
+    "ventana_inicio": "2026-11-20T02:00:00Z",
+    "ventana_fin": "2026-11-20T04:00:00Z",
+    "solicitante_id": "usr-acme-00007",
+    "aprobador_id": "usr-acme-00001",
+    "aprobado_en": "2026-11-06T09:00:00Z",
+    "motivo_rechazo": null,
+    "problema_id": "prb-acme-000123",
+    "solicitud_id": null,
+    "creado_en": "2026-11-05T14:30:00Z",
+    "actualizado_en": "2026-11-06T10:15:00Z"
+  },
+  "campos_al_implementar": {
+    "implementado_en": "2026-11-20T03:40:00Z",
+    "implementado_por": "usr-acme-00007",
+    "notas_implementacion": "Implementado sin incidencias."
+  },
+  "eventos_fase_eda": {
+    "estado": "Pospuesto por el contrato v1.1 (EVENTS_ENABLED=false). El publicador es no-op.",
+    "publica": {
+      "cambio.aprobado": {"cambio_id": "chg-...", "aprobador_id": "usr-..."},
+      "cambio.implementado": {"cambio_id": "chg-...", "problema_id": "prb-... | null", "solicitud_id": "req-... | null"}
+    },
+    "consume_q_cambios": {
+      "problema.causa_raiz_identificada": "crea RFC en BORRADOR con problema_id (idempotente)",
+      "solicitud.cambio_estandar": "crea cambio ESTANDAR en APROBADO con solicitud_id (idempotente)"
+    }
+  }
+}

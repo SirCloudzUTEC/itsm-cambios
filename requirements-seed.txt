@@ -1,0 +1,2 @@
+# Solo para correr el seed y el conteo en local (boto3 ya viene en el runtime de Lambda)
+boto3>=1.34,<2
