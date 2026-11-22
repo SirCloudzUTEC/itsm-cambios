@@ -2,7 +2,7 @@
 
 Microservicio de **Gestión de Cambios (RFC)** del SaaS ITSM: registro de la solicitud de cambio, evaluación de riesgo, aprobación, programación en ventana e implementación. Es multi-tenant, serverless (API Gateway + Lambda + DynamoDB) y se protege con el Lambda Authorizer compartido de `itsm-auth`.
 
-> **Fase actual (contrato de integración v1.1, avance 30%):** se despliegan el CRUD y la tabla **sin SNS/SQS ni consumidores**. El publicador de eventos es un no-op (`EVENTS_ENABLED=false`). El consumidor de `q-cambios` está en `src/consumers/` como código futuro, fuera del despliegue.
+> **Estado actual:** desplegado en AWS (`dev`, `us-east-1`) con API Gateway, Lambda Python 3.12, DynamoDB y eventos SNS/SQS habilitados. Publica eventos mediante `itsm-eventos-dev` y consume `itsm-q-cambios-dev`.
 
 ## Parámetros comunes
 
@@ -20,8 +20,8 @@ Microservicio de **Gestión de Cambios (RFC)** del SaaS ITSM: registro de la sol
 ```text
 serverless.yml               API, tabla DynamoDB (GSI1 estado, GSI2 ventana) y authorizer compartido
 src/handlers/cambios.py      endpoints y flujo de estados
-src/common/                  http (respuestas), auth (contexto del authorizer), modelo (DynamoDB), events (no-op)
-src/consumers/eventos.py     consumidor de q-cambios (fase EDA, NO desplegado)
+src/common/                  http (respuestas), auth (contexto del authorizer), modelo (DynamoDB), events (publicacion SNS)
+src/consumers/eventos.py     consumidor de q-cambios (desplegado y habilitado)
 seed/seed_cambios.py         10 000 cambios por tenant con IDs deterministas
 scripts/contar_por_tenant.py conteo por tenant para la evidencia
 scripts/generate_dev_token.py JWT de prueba (requiere JWT_SECRET; no compartirlo)
@@ -104,7 +104,7 @@ Las pruebas no necesitan AWS. Cubren:
 - Validación de referencias de otro tenant.
 - El flujo completo de estados y los 409 por transición inválida.
 - La paginación con `limite` y `siguiente`, y el rechazo de un cursor de otro tenant.
-- Los filtros por GSI1, el calendario por GSI2, el publicador no-op, el consumidor idempotente y la reproducibilidad del seed.
+- Los filtros por GSI1, el calendario por GSI2, el publicador en modo deshabilitado, el consumidor idempotente y la reproducibilidad del seed.
 
 ## Pruebas de integración (evidencias para el ACL y el informe)
 
@@ -120,17 +120,47 @@ Obtén un token con `POST {VITE_API_AUTH}/auth/login` y luego:
 | Conteo | `python scripts/contar_por_tenant.py` | 10 000 por tenant |
 | Logs | CloudWatch → `/aws/lambda/itsm-cambios-dev-api` | líneas `accion {...}` con tenant, usuario y cambio |
 
-## Fase EDA (cuando el profesor la autorice)
+## Integracion por eventos desplegada
 
-1. Infra se despliega primero y publica los ARN reales en SSM.
-2. En `serverless.yml`, añade `SNS_EVENTOS_ARN: ${ssm:/itsm/${sls:stage}/sns-eventos-arn}`, cambia `EVENTS_ENABLED` a `"true"` y quita `!src/consumers/**` de `package.patterns`.
-3. Declara la función `consumirQCambios`. El bloque está documentado en `src/consumers/eventos.py`.
+La infraestructura compartida de `itsm-infra` proporciona el topico SNS `itsm-eventos-dev`, las colas SQS, sus DLQ y los filtros de suscripcion.
 
-Eventos de la fase EDA:
-- **Publica:**
-  - `cambio.aprobado`
-  - `cambio.implementado`, con `data` = `{cambio_id, problema_id, solicitud_id}`. Problemas usa `problema_id` y Solicitudes usa `solicitud_id`; cuando alguno viene en `null`, el servicio correspondiente lo ignora.
-- **Consume:**
-  - `problema.causa_raiz_identificada`: crea un RFC en BORRADOR.
-  - `solicitud.cambio_estandar`: crea un cambio ESTANDAR en estado APROBADO.
-  - Los dos son idempotentes.
+La configuracion desplegada de Cambios utiliza:
+
+- `EVENTS_ENABLED=true`.
+- `SNS_EVENTOS_ARN` obtenido de SSM Parameter Store.
+- Lambda `itsm-cambios-dev-consumirQCambios` conectada a `itsm-q-cambios-dev`.
+- Procesamiento SQS habilitado con `ReportBatchItemFailures`.
+
+### Eventos publicados
+
+- `cambio.aprobado`: registra la aprobacion de un RFC.
+- `cambio.implementado`: contiene `cambio_id`, `problema_id` y `solicitud_id`. Los consumidores respectivos utilizan la referencia que corresponda.
+
+### Eventos consumidos
+
+- `problema.causa_raiz_identificada`: genera un RFC normal en `BORRADOR` vinculado al problema.
+- `solicitud.cambio_estandar`: genera un RFC estandar preaprobado, con estado `APROBADO`, vinculado a la solicitud.
+
+Los consumidores usan identificadores deterministas para evitar duplicados cuando SQS vuelve a entregar un evento.
+
+### Integraciones verificadas en AWS
+
+**Problemas -> Cambios -> Problemas -> Incidentes**
+
+- Problema: `prb-acme-evt856d7948b6b3`.
+- RFC generado: `chg-acme-e40688e8e5ca`.
+- RFC implementado y problema resuelto automaticamente.
+- Incidente vinculado `inc-acme-010001` resuelto mediante `problema.resuelto`.
+
+**Solicitudes -> Cambios -> Solicitudes**
+
+- Solicitud: `req-acme-1795327666595-ppso`.
+- RFC generado: `chg-acme-e1c48fc7f10a`.
+- Tipo `ESTANDAR`, riesgo `BAJO`, estado inicial `APROBADO`.
+- Tras implementar el RFC, la solicitud paso automaticamente a `COMPLETADA` y registro su `cambio_id`.
+
+Ambos circuitos se verificaron mediante las APIs desplegadas y consultas a DynamoDB.
+
+### Limitacion conocida
+
+La API exige que el RFC este `PROGRAMADO` antes de implementarlo, pero no comprueba que la hora actual este dentro de la ventana programada. La implementacion anticipada fue aceptada durante una prueba. Esta validacion temporal queda pendiente de mejora.
