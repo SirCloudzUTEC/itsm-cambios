@@ -1,11 +1,6 @@
 service: itsm-cambios
 frameworkVersion: "3"
 
-# Contrato de integración v1.1 (avance 30%):
-#  - us-east-1, stage dev, Python 3.12, LabRole.
-#  - Authorizer compartido de itsm-auth vía SSM /itsm/{stage}/authorizer-arn.
-#  - SIN SNS/SQS ni consumidores en esta fase (EVENTS_ENABLED=false, no se resuelve
-#    /itsm/{stage}/sns-eventos-arn ni /itsm/{stage}/q-cambios-arn).
 
 provider:
   name: aws
@@ -19,7 +14,8 @@ provider:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
   environment:
     CAMBIOS_TABLE: ${self:service}-${sls:stage}-cambios
-    EVENTS_ENABLED: "false"
+    EVENTS_ENABLED: "true"
+    SNS_EVENTOS_ARN: ${ssm:/itsm/${sls:stage}/sns-eventos-arn}
 
 package:
   patterns:
@@ -34,7 +30,6 @@ package:
     - "!venv/**"
     - "!node_modules/**"
     - "!**/__pycache__/**"
-    - "!src/consumers/**"   # código futuro (fase EDA), fuera del despliegue
 
 custom:
   authorizer:
@@ -98,6 +93,15 @@ functions:
           method: post
           cors: true
           authorizer: ${self:custom.authorizer}
+
+  consumirQCambios:
+    handler: src/consumers/eventos.handler
+    events:
+      - sqs:
+          arn: ${ssm:/itsm/${sls:stage}/q-cambios-arn}
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+          enabled: true
 
 resources:
   Resources:
